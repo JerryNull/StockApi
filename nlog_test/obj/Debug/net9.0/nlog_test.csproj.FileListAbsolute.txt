@@ -1,0 +1,5 @@
+C:\StockApi\nlog_test\obj\Debug\net9.0\nlog_test.GeneratedMSBuildEditorConfig.editorconfig
+C:\StockApi\nlog_test\obj\Debug\net9.0\nlog_test.AssemblyInfoInputs.cache
+C:\StockApi\nlog_test\obj\Debug\net9.0\nlog_test.AssemblyInfo.cs
+C:\StockApi\nlog_test\obj\Debug\net9.0\nlog_test.csproj.CoreCompileInputs.cache
+C:\StockApi\nlog_test\obj\Debug\net9.0\nlog_test.sourcelink.json

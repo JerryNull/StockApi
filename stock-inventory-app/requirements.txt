@@ -1,0 +1,6 @@
+Flask
+requests
+tkinter
+concurrent.futures
+esun_marketdata
+configparser
