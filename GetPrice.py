@@ -49,6 +49,10 @@ production_config_path = os.path.join(base_dir, 'config.production.ini')
 is_production = environment_name in ('PROD', 'PRODUCTION')
 switch_target_path = simulation_config_path if is_production else production_config_path
 switch_target_label = '測試環境' if is_production else '正式環境'
+DEFAULT_SIM_SYMBOLS = "0050,2313,2337,2344,2408,8358"
+WATCHLIST_FILE = os.path.join(base_dir, 'watchlist.production.txt')
+WINDOW_GEOMETRY_FILE = os.path.join(base_dir, 'window.geometry.txt')
+DEFAULT_WINDOW_GEOMETRY = '1000x600'
 
 marketdata_sdk = EsunMarketdata(config)
 marketdata_sdk.login()
@@ -62,13 +66,16 @@ if is_production:
         trade_sdk.login()
     except Exception as e:
         trade_sdk_init_error = str(e)
-INVENTORY_REFRESH_MS = 5000
+INVENTORY_REFRESH_MS = 6000
+INVENTORY_BACKOFF_MS = 60000
 
 LOG_DIR = r'D:\StockApiLog'
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
 inventory_inflight = False
+last_quote_map = {}
+next_inventory_delay_ms = INVENTORY_REFRESH_MS
 
 def write_log_batch(log_lines):
     if not log_lines:
@@ -78,7 +85,104 @@ def write_log_batch(log_lines):
     with open(log_path, 'a', encoding='utf-8') as f:
         f.writelines(log_lines)
 
+def load_window_geometry():
+    if not os.path.exists(WINDOW_GEOMETRY_FILE):
+        return DEFAULT_WINDOW_GEOMETRY
+
+    try:
+        with open(WINDOW_GEOMETRY_FILE, 'r', encoding='utf-8') as f:
+            geom = f.read().strip()
+            if geom:
+                return geom
+    except Exception:
+        pass
+    return DEFAULT_WINDOW_GEOMETRY
+
+def save_window_geometry():
+    try:
+        geom = root.geometry()
+        with open(WINDOW_GEOMETRY_FILE, 'w', encoding='utf-8') as f:
+            f.write(geom)
+    except Exception:
+        pass
+
+def on_window_resize(event=None):
+    '''動態調整 Treeview 欄位寬度以適應視窗大小'''
+    try:
+        if quote_tree:
+            total_width = quote_tree.winfo_width()
+            if total_width > 1:
+                col_width = max(60, total_width // 6)
+                quote_tree.column('Symbol', width=col_width)
+                quote_tree.column('Name', width=col_width)
+                quote_tree.column('Price', width=col_width)
+                quote_tree.column('Change', width=col_width)
+                quote_tree.column('PctChange', width=col_width)
+                quote_tree.column('Time', width=col_width)
+        
+        if is_production and inventory_tree:
+            total_width = inventory_tree.winfo_width()
+            if total_width > 1:
+                col_width = max(70, total_width // 6)
+                inventory_tree.column('Symbol', width=col_width)
+                inventory_tree.column('Name', width=col_width)
+                inventory_tree.column('Qty', width=col_width)
+                inventory_tree.column('Unrealized', width=col_width)
+                inventory_tree.column('ReturnRate', width=col_width)
+                inventory_tree.column('Time', width=col_width)
+    except Exception:
+        pass
+
+def normalize_symbols_text(input_text):
+    text = (input_text or '').replace('，', ',')
+    parts = [s.strip() for s in text.split(',') if s.strip()]
+
+    deduped = []
+    seen = set()
+    for symbol in parts:
+        if symbol not in seen:
+            seen.add(symbol)
+            deduped.append(symbol)
+
+    return ','.join(deduped)
+
+def load_saved_watchlist():
+    if not is_production:
+        return DEFAULT_SIM_SYMBOLS
+
+    if not os.path.exists(WATCHLIST_FILE):
+        return ''
+
+    try:
+        with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
+            return normalize_symbols_text(f.read())
+    except Exception:
+        return ''
+
+def persist_current_watchlist(show_message=True):
+    if not is_production:
+        return
+
+    symbols_text = normalize_symbols_text(entry.get())
+
+    try:
+        with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
+            f.write(symbols_text)
+
+        entry.delete(0, tk.END)
+        entry.insert(0, symbols_text)
+
+        if show_message:
+            environment_var.set(f'目前環境：{environment_label}｜設定檔：{config_display_name}｜已儲存自選股')
+    except Exception as e:
+        if show_message:
+            environment_var.set(f'儲存自選股失敗：{e}')
+
 def switch_environment():
+    save_window_geometry()
+    if is_production:
+        persist_current_watchlist(show_message=False)
+
     target_path = switch_target_path
     if not os.path.exists(target_path):
         environment_var.set(f'切換失敗：找不到設定檔 {os.path.basename(target_path)}')
@@ -88,6 +192,16 @@ def switch_environment():
     env = os.environ.copy()
     env['ESUN_CONFIG_FILE'] = target_path
     subprocess.Popen(command, cwd=base_dir, env=env)
+    root.destroy()
+
+def update_quote_cache(quote_map):
+    global last_quote_map
+    last_quote_map.update(quote_map)
+
+def on_close_app():
+    save_window_geometry()
+    if is_production:
+        persist_current_watchlist(show_message=False)
     root.destroy()
 
 def start_update():
@@ -178,6 +292,7 @@ def fetch_quotes_map(symbols):
     return quote_map
 
 def build_inventory_rows(inventory_items):
+    '''快速組裝庫存列，只用帳務 API，不同步查詢報價以避免超時。報價用緩存補充。'''
     rows = []
     for item in inventory_items:
         if not isinstance(item, dict):
@@ -205,11 +320,8 @@ def build_inventory_rows(inventory_items):
         }
         rows.append(row)
 
-    symbols_missing_price = [r['symbol'] for r in rows if r['current_price'] is None]
-    quote_map = fetch_quotes_map(symbols_missing_price)
-
     for row in rows:
-        quote = quote_map.get(row['symbol'])
+        quote = last_quote_map.get(row['symbol'])
         if quote:
             if row['current_price'] is None:
                 row['current_price'] = safe_float(quote.get('closePrice'))
@@ -278,15 +390,16 @@ def fetch_data(symbols):
     
     # 資料獲取完畢後，通知主執行緒更新 UI，並提供 symbols 比對避免閃爍
     root.after(0, update_quote_ui, results, symbols)
+    update_quote_cache({r[0]: {'closePrice': r[2], 'name': r[1]} for r in results})
 
 def start_inventory_update():
     if not is_production:
         return
 
-    global inventory_inflight
+    global inventory_inflight, next_inventory_delay_ms
 
     if inventory_inflight:
-        root.after(INVENTORY_REFRESH_MS, start_inventory_update)
+        root.after(next_inventory_delay_ms, start_inventory_update)
         return
 
     inventory_inflight = True
@@ -296,7 +409,7 @@ def fetch_inventory_data():
     if not is_production:
         return
 
-    global inventory_inflight
+    global inventory_inflight, next_inventory_delay_ms
     now_str = datetime.now().strftime('%H:%M:%S')
 
     try:
@@ -307,13 +420,18 @@ def fetch_inventory_data():
 
         rows = build_inventory_rows(inventory_items)
         status = f"更新成功：{len(rows)} 筆 ({now_str})"
+        next_inventory_delay_ms = INVENTORY_REFRESH_MS
         root.after(0, finalize_inventory_refresh, rows, status)
     except Exception as e:
         msg = str(e)
         if 'Invalid IP' in msg:
             msg = '庫存更新失敗：IP 不在券商白名單（請到玉山 API 後台設定可連線 IP）'
+        elif 'AGR0003' in msg or 'Exceed Transaction Rate Limit' in msg:
+            msg = '庫存更新失敗：超過交易頻率限制，將於 60 秒後自動重試'
+            next_inventory_delay_ms = INVENTORY_BACKOFF_MS
         else:
             msg = f'庫存更新失敗：{msg}'
+            next_inventory_delay_ms = INVENTORY_REFRESH_MS
         status = f"{msg} ({now_str})"
         root.after(0, finalize_inventory_refresh, None, status)
     finally:
@@ -377,7 +495,7 @@ def reorder_inventory_tree():
         try:
             if inv_sort_col in ('Qty',):
                 sort_val = int(float(val.replace(',', '')))
-            elif inv_sort_col in ('AvgPrice', 'CurrentPrice', 'MarketValue', 'Unrealized'):
+            elif inv_sort_col in ('Unrealized',):
                 sort_val = float(val.replace(',', ''))
             elif inv_sort_col == 'ReturnRate':
                 sort_val = float(val.strip('%').replace(',', ''))
@@ -433,9 +551,6 @@ def update_inventory_ui(rows):
             symbol,
             row['name'],
             f"{row['qty']:,}",
-            fmt_num(row['avg_price']),
-            fmt_num(row['current_price']),
-            fmt_num(row['market_value']),
             fmt_num(unrealized),
             '-' if row['return_rate'] is None else f"{row['return_rate']:.2f}%",
             now_str
@@ -458,12 +573,13 @@ def finalize_inventory_refresh(rows, status):
 
     inventory_status_var.set(status)
     update_inventory_ui(rows)
-    root.after(INVENTORY_REFRESH_MS, start_inventory_update)
+    root.after(next_inventory_delay_ms, start_inventory_update)
 
 root = tk.Tk()
 root.title(f"即時股價與庫存明細 - {environment_label}")
 root.configure(bg='black')
 root.attributes('-topmost', True)
+root.geometry(load_window_geometry())
 
 inventory_tree = None
 inventory_status_var = None
@@ -507,8 +623,20 @@ frame = tk.Frame(quote_tab, bg='black')
 frame.pack(pady=10)
 tk.Label(frame, text="股票代號 (逗號分隔):", bg='black', fg='white').pack(side=tk.LEFT)
 entry = tk.Entry(frame, width=30, bg='#222222', fg='white', insertbackground='white')
-entry.insert(0, "0050,2313,2337,2344,2408,8358")
+entry.insert(0, load_saved_watchlist())
 entry.pack(side=tk.LEFT, padx=5)
+
+if is_production:
+    save_button = tk.Button(
+        frame,
+        text='儲存自選股',
+        command=lambda: persist_current_watchlist(show_message=True),
+        bg='#444444',
+        fg='white',
+        activebackground='#666666',
+        activeforeground='white'
+    )
+    save_button.pack(side=tk.LEFT, padx=5)
 
 quote_tree = ttk.Treeview(quote_tab, columns=('Symbol', 'Name', 'Price', 'Change', 'PctChange', 'Time'), show='headings')
 quote_tree.heading('Symbol', text='代號', command=lambda: on_heading_click('Symbol'))
@@ -517,6 +645,13 @@ quote_tree.heading('Price', text='成交價', command=lambda: on_heading_click('
 quote_tree.heading('Change', text='漲跌', command=lambda: on_heading_click('Change'))
 quote_tree.heading('PctChange', text='漲跌幅', command=lambda: on_heading_click('PctChange'))
 quote_tree.heading('Time', text='時間', command=lambda: on_heading_click('Time'))
+
+quote_tree.column('Symbol', width=60, anchor='center')
+quote_tree.column('Name', width=100, anchor='w')
+quote_tree.column('Price', width=80, anchor='e')
+quote_tree.column('Change', width=80, anchor='e')
+quote_tree.column('PctChange', width=80, anchor='e')
+quote_tree.column('Time', width=100, anchor='center')
 
 quote_tree.tag_configure('up', foreground='red')
 quote_tree.tag_configure('down', foreground='green')
@@ -531,18 +666,22 @@ if is_production:
 
     inventory_tree = ttk.Treeview(
         inventory_tab,
-        columns=('Symbol', 'Name', 'Qty', 'AvgPrice', 'CurrentPrice', 'MarketValue', 'Unrealized', 'ReturnRate', 'Time'),
+        columns=('Symbol', 'Name', 'Qty', 'Unrealized', 'ReturnRate', 'Time'),
         show='headings'
     )
     inventory_tree.heading('Symbol', text='代號', command=lambda: on_inventory_heading_click('Symbol'))
     inventory_tree.heading('Name', text='名稱', command=lambda: on_inventory_heading_click('Name'))
     inventory_tree.heading('Qty', text='庫存股數', command=lambda: on_inventory_heading_click('Qty'))
-    inventory_tree.heading('AvgPrice', text='均價', command=lambda: on_inventory_heading_click('AvgPrice'))
-    inventory_tree.heading('CurrentPrice', text='現價', command=lambda: on_inventory_heading_click('CurrentPrice'))
-    inventory_tree.heading('MarketValue', text='市值', command=lambda: on_inventory_heading_click('MarketValue'))
     inventory_tree.heading('Unrealized', text='未實現損益', command=lambda: on_inventory_heading_click('Unrealized'))
     inventory_tree.heading('ReturnRate', text='報酬率', command=lambda: on_inventory_heading_click('ReturnRate'))
     inventory_tree.heading('Time', text='更新時間', command=lambda: on_inventory_heading_click('Time'))
+
+    inventory_tree.column('Symbol', width=70, anchor='center')
+    inventory_tree.column('Name', width=100, anchor='w')
+    inventory_tree.column('Qty', width=100, anchor='e')
+    inventory_tree.column('Unrealized', width=120, anchor='e')
+    inventory_tree.column('ReturnRate', width=100, anchor='e')
+    inventory_tree.column('Time', width=120, anchor='center')
 
     inventory_tree.tag_configure('up', foreground='red')
     inventory_tree.tag_configure('down', foreground='green')
@@ -553,4 +692,6 @@ if is_production:
 start_update()
 if is_production:
     start_inventory_update()
+root.protocol("WM_DELETE_WINDOW", on_close_app)
+root.bind('<Configure>', on_window_resize)
 root.mainloop()
