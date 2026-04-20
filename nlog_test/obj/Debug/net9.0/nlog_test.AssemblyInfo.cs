@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("nlog_test")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+852bf23e36babc61f05ce5b659128e532b9a7030")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f957c179ddbd9e112c6e52516a6a899217502f1d")]
 [assembly: System.Reflection.AssemblyProductAttribute("nlog_test")]
 [assembly: System.Reflection.AssemblyTitleAttribute("nlog_test")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
