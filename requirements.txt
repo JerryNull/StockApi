@@ -1,0 +1,7 @@
+esun-marketdata
+pandas>=2.0
+numpy>=1.24
+click>=8.1
+flask>=3.0
+apscheduler>=3.10
+plotly>=5.0

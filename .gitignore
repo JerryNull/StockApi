@@ -1,0 +1,18 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Runtime outputs / local artifacts
+data/
+output/
+report/
+window.geometry.txt
+my_watchlist.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
