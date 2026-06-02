@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>產業 Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f1117; color: #e0e0e0; }
+  header { padding: 16px 24px; background: #1a1d27; border-bottom: 1px solid #2a2d3a; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 1.2rem; font-weight: 600; color: #fff; }
+  .badge { font-size: .75rem; padding: 2px 8px; border-radius: 20px; background: #2a2d3a; color: #aaa; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; }
+  @media(max-width:900px){ .grid { grid-template-columns: 1fr; } }
+  .card { background: #1a1d27; border-radius: 12px; padding: 16px; }
+  .card-title { font-size: .85rem; color: #888; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+  .card-title select { background: #2a2d3a; color: #ccc; border: none; border-radius: 6px; padding: 3px 8px; font-size: .8rem; cursor: pointer; }
+  .chart { width: 100%; }
+  #sectorBarChart  { height: 480px; }
+  #sectorTreemap   { height: 480px; }
+  .loading { display: flex; align-items: center; justify-content: center; height: 100%; color: #555; font-size: .9rem; }
+  .error { color: #e74c3c; font-size: .85rem; padding: 8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📊 產業 Dashboard</h1>
+  <span class="badge" id="lastUpdate">載入中...</span>
+</header>
+
+<div class="grid">
+  <!-- 產業漲跌長條圖 -->
+  <div class="card">
+    <div class="card-title">
+      產業漲跌圖
+      <select id="periodSelect" onchange="loadSectors()">
+        <option value="1d">近1日</option>
+      </select>
+    </div>
+    <div id="sectorBarChart" class="chart"></div>
+  </div>
+
+  <!-- 類股交易量樹狀圖 -->
+  <div class="card">
+    <div class="card-title">
+      類股交易量圖
+      <select id="industrySelect" onchange="loadTreemap(this.value)">
+        <option value="">選擇產業...</option>
+      </select>
+    </div>
+    <div id="sectorTreemap" class="chart"></div>
+  </div>
+</div>
+
+<script>
+const barChart = echarts.init(document.getElementById('sectorBarChart'), 'dark');
+const treemapChart = echarts.init(document.getElementById('sectorTreemap'), 'dark');
+let sectorsData = [];
+
+// 初始化載入狀態
+barChart.showLoading({ text: '載入資料中...', color: '#3498db', textColor: '#888', maskColor: 'transparent' });
+treemapChart.showLoading({ text: '請先選擇產業', color: '#3498db', textColor: '#888', maskColor: 'transparent' });
+
+async function loadSectors() {
+  barChart.showLoading({ text: '更新中...', color: '#3498db', textColor: '#888', maskColor: 'transparent' });
+  try {
+    const res = await fetch('/api/sector/summaries');
+    if (!res.ok) throw new Error(await res.text());
+    sectorsData = await res.json();
+    renderBarChart(sectorsData);
+
+    // 填充產業選單
+    const sel = document.getElementById('industrySelect');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">選擇產業...</option>' +
+      sectorsData.map(s =>
+        `<option value="${s.industryCode}">${s.industryName}</option>`
+      ).join('');
+    if (prev) sel.value = prev;
+
+    document.getElementById('lastUpdate').textContent =
+      '更新：' + new Date().toLocaleTimeString('zh-TW');
+  } catch (e) {
+    barChart.hideLoading();
+    barChart.setOption({ title: { text: '⚠️ 載入失敗：' + e.message, left: 'center', top: 'center', textStyle: { color: '#e74c3c', fontSize: 14 } } });
+  }
+}
+
+function renderBarChart(data) {
+  barChart.hideLoading();
+  const sorted = [...data].sort((a, b) => b.avgChangePercent - a.avgChangePercent);
+  const names = sorted.map(s => s.industryName);
+  const values = sorted.map(s => s.avgChangePercent);
+  const colors = values.map(v => v >= 0 ? '#e05c5c' : '#26a69a');
+
+  barChart.setOption({
+    backgroundColor: 'transparent',
+    grid: { left: 90, right: 60, top: 10, bottom: 20 },
+    xAxis: {
+      type: 'value',
+      axisLabel: { color: '#888', formatter: v => v.toFixed(2) + '%' },
+      splitLine: { lineStyle: { color: '#2a2d3a' } },
+    },
+    yAxis: {
+      type: 'category',
+      data: names,
+      axisLabel: { color: '#ccc', fontSize: 11 },
+      axisLine: { lineStyle: { color: '#2a2d3a' } },
+    },
+    tooltip: {
+      trigger: 'axis',
+      formatter: p => {
+        const d = sorted[p[0].dataIndex];
+        return `${d.industryName}<br/>漲跌幅：${d.avgChangePercent.toFixed(2)}%<br/>股票數：${d.stockCount}`;
+      }
+    },
+    series: [{
+      type: 'bar',
+      data: values.map((v, i) => ({ value: v, itemStyle: { color: colors[i] } })),
+      barMaxWidth: 20,
+      label: { show: true, position: v => v.value >= 0 ? 'right' : 'left', formatter: p => p.value.toFixed(2) + '%', color: '#ccc', fontSize: 10 },
+    }],
+  });
+}
+
+async function loadTreemap(industryCode) {
+  if (!industryCode) return;
+  treemapChart.showLoading({ text: '載入中...', color: '#3498db', textColor: '#888', maskColor: 'transparent' });
+  try {
+    const res = await fetch(`/api/sector/stocks/${industryCode}`);
+    if (!res.ok) throw new Error(await res.text());
+    const stocks = await res.json();
+    renderTreemap(stocks, industryCode);
+  } catch (e) {
+    treemapChart.hideLoading();
+  }
+}
+
+function renderTreemap(stocks, industryCode) {
+  treemapChart.hideLoading();
+  const sectorName = sectorsData.find(s => s.industryCode === industryCode)?.industryName ?? industryCode;
+
+  const data = stocks.map(s => ({
+    name: s.name || s.symbol,
+    value: s.volume || 1,
+    label: { formatter: `{b}\n${s.changePercent != null ? (s.changePercent >= 0 ? '+' : '') + s.changePercent.toFixed(2) + '%' : '--'}` },
+    itemStyle: {
+      color: s.changePercent == null ? '#555'
+           : s.changePercent > 0 ? interpolateColor('#4caf50', '#e05c5c', 0)
+           : s.changePercent < 0 ? interpolateColor('#26a69a', '#26a69a', 0)
+           : '#555',
+    },
+    changePercent: s.changePercent,
+  }));
+
+  // 用漲跌幅決定顏色深淺
+  const maxAbs = Math.max(0.1, ...data.map(d => Math.abs(d.changePercent ?? 0)));
+  data.forEach(d => {
+    const pct = d.changePercent ?? 0;
+    const intensity = Math.min(1, Math.abs(pct) / maxAbs);
+    if (pct > 0) d.itemStyle.color = lerpColor('#3d6b3d', '#e05c5c', intensity);
+    else if (pct < 0) d.itemStyle.color = lerpColor('#2d5a5a', '#26a69a', intensity);
+    else d.itemStyle.color = '#3a3a3a';
+  });
+
+  treemapChart.setOption({
+    backgroundColor: 'transparent',
+    title: { text: sectorName + ' 類股交易量', left: 'center', textStyle: { color: '#888', fontSize: 13 } },
+    tooltip: {
+      formatter: p => `${p.name}<br/>漲跌幅：${p.data.changePercent != null ? p.data.changePercent.toFixed(2) + '%' : '--'}<br/>交易量：${(p.value / 1000).toFixed(0)}K`
+    },
+    series: [{
+      type: 'treemap',
+      data,
+      roam: false,
+      nodeClick: false,
+      breadcrumb: { show: false },
+      label: { show: true, fontSize: 12, color: '#fff' },
+      itemStyle: { borderColor: '#0f1117', borderWidth: 2, gapWidth: 2 },
+      levels: [{ itemStyle: { borderColor: '#0f1117', borderWidth: 2 } }],
+    }],
+  });
+}
+
+function lerpColor(a, b, t) {
+  const ah = parseInt(a.slice(1), 16);
+  const bh = parseInt(b.slice(1), 16);
+  const ar = (ah >> 16) & 0xff, ag = (ah >> 8) & 0xff, ab = ah & 0xff;
+  const br = (bh >> 16) & 0xff, bg = (bh >> 8) & 0xff, bb = bh & 0xff;
+  const r = Math.round(ar + (br - ar) * t);
+  const g = Math.round(ag + (bg - ag) * t);
+  const bv = Math.round(ab + (bb - ab) * t);
+  return `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${bv.toString(16).padStart(2,'0')}`;
+}
+
+function interpolateColor(a, b, t) { return lerpColor(a, b, t); }
+
+// 初始載入 + 自動更新（5分鐘）
+loadSectors();
+setInterval(loadSectors, 5 * 60 * 1000);
+window.addEventListener('resize', () => { barChart.resize(); treemapChart.resize(); });
+</script>
+</body>
+</html>
