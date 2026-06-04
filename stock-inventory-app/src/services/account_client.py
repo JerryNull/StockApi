@@ -5,8 +5,8 @@ class AccountClient:
     def __init__(self, config_path):
         self.config = ConfigParser()
         self.config.read(config_path)
-        self.base_url = self.config.get('API', 'base_url')
-        self.api_key = self.config.get('API', 'api_key')
+        self.base_url = self.config.get('Core', 'Entry')
+        self.api_key = self.config.get('Api', 'Key')
 
     def get_inventory_details(self):
         url = f"{self.base_url}/account/inventory"

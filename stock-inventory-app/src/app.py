@@ -1,13 +1,13 @@
 import os
 from configparser import ConfigParser
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 from services.account_client import AccountClient
 from services.sector_service import SectorService
 from esun_marketdata import EsunMarketdata
 
 # ── 初始化玉山 SDK ──────────────────────────────────────────────
 base_dir = os.path.dirname(os.path.abspath(__file__))
-config_path = os.path.join(base_dir, '..', 'config.simulation.ini')
+config_path = os.path.join(base_dir, '..', '..', 'config.simulation.ini')
 config = ConfigParser()
 config.read(config_path)
 
@@ -17,7 +17,7 @@ rest_stock = marketdata_sdk.rest_client.stock
 
 # ── Flask 應用 ──────────────────────────────────────────────────
 app = Flask(__name__)
-account_client = AccountClient()
+account_client = AccountClient(config_path)
 sector_service = SectorService(rest_stock)
 
 
@@ -36,13 +36,15 @@ def sector_dashboard():
 
 @app.route('/api/sector/summaries')
 def sector_summaries():
-    data = sector_service.get_sector_summaries()
+    days = request.args.get('days', default=1, type=int)
+    data = sector_service.get_sector_summaries(days=days)
     return jsonify(data)
 
 
 @app.route('/api/sector/stocks/<industry_code>')
 def sector_stocks(industry_code):
-    data = sector_service.get_stocks_in_sector(industry_code)
+    days = request.args.get('days', default=1, type=int)
+    data = sector_service.get_stocks_in_sector(industry_code, days=days)
     return jsonify(data)
 
 
