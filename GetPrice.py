@@ -66,7 +66,7 @@ if is_production:
         trade_sdk.login()
     except Exception as e:
         trade_sdk_init_error = str(e)
-INVENTORY_REFRESH_MS = 6000
+INVENTORY_REFRESH_MS = 10000
 INVENTORY_BACKOFF_MS = 60000
 
 LOG_DIR = r'D:\StockApiLog'
