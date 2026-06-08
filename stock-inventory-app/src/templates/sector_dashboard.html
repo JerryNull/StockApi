@@ -11,11 +11,12 @@
   header { padding: 16px 24px; background: #1a1d27; border-bottom: 1px solid #2a2d3a; display: flex; align-items: center; gap: 16px; }
   header h1 { font-size: 1.2rem; font-weight: 600; color: #fff; }
   .badge { font-size: .75rem; padding: 2px 8px; border-radius: 20px; background: #2a2d3a; color: #aaa; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; }
-  @media(max-width:900px){ .grid { grid-template-columns: 1fr; } }
+  .grid { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 16px; }
   .card { background: #1a1d27; border-radius: 12px; padding: 16px; }
   .card-title { font-size: .85rem; color: #888; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
   .card-title select { background: #2a2d3a; color: #ccc; border: none; border-radius: 6px; padding: 3px 8px; font-size: .8rem; cursor: pointer; }
+  .card-title input { width: 90px; background: #2a2d3a; color: #ccc; border: 1px solid #3a3f4f; border-radius: 6px; padding: 3px 8px; font-size: .8rem; }
+  .hint { color: #777; font-size: .75rem; }
   .card-subtitle { font-size: .75rem; color: #9aa0aa; margin-bottom: 10px; min-height: 18px; }
   .chart { width: 100%; }
   #sectorBarChart  { height: 480px; }
@@ -35,10 +36,8 @@
   <div class="card">
     <div class="card-title">
       產業漲跌圖
-      <select id="periodSelect" onchange="loadSectors()">
-        <option value="1d">近1日</option>
-        <option value="120">近120日</option>
-      </select>
+      <span class="hint">天數</span>
+      <input id="daysInput" type="number" min="1" max="9999" value="1" onkeydown="if(event.key==='Enter') loadSectors()" onchange="loadSectors()" />
     </div>
     <div class="card-subtitle" id="sectorStatus">載入中...</div>
     <div id="sectorBarChart" class="chart"></div>
@@ -51,12 +50,8 @@
       <select id="industrySelect" onchange="loadTreemap(this.value)">
         <option value="">選擇產業...</option>
       </select>
-      <select id="treemapPeriodSelect" onchange="if(document.getElementById('industrySelect').value) loadTreemap(document.getElementById('industrySelect').value)">
-        <option value="1d">近1日</option>
-        <option value="120">近120日</option>
-      </select>
     </div>
-    <div class="card-subtitle" id="treemapStatus">請先選擇產業</div>
+    <div class="card-subtitle" id="treemapStatus">預設顯示漲幅最高產業</div>
     <div id="sectorTreemap" class="chart"></div>
   </div>
 </div>
@@ -66,6 +61,14 @@ const hasEcharts = typeof echarts !== 'undefined';
 const barChart = hasEcharts ? echarts.init(document.getElementById('sectorBarChart'), 'dark') : null;
 const treemapChart = hasEcharts ? echarts.init(document.getElementById('sectorTreemap'), 'dark') : null;
 let sectorsData = [];
+
+function getSelectedDays() {
+  const input = document.getElementById('daysInput');
+  const raw = parseInt((input?.value || '1').trim(), 10);
+  const days = Number.isFinite(raw) ? Math.max(1, raw) : 1;
+  if (input) input.value = String(days);
+  return days;
+}
 
 // 初始化載入狀態
 if (barChart) {
@@ -83,7 +86,7 @@ async function loadSectors() {
     barChart.showLoading({ text: '更新中...', color: '#3498db', textColor: '#888', maskColor: 'transparent' });
   }
   try {
-    const days = parseInt(document.getElementById('periodSelect').value || '1', 10);
+    const days = getSelectedDays();
     const res = await fetch(`/api/sector/summaries?days=${days}`);
     if (!res.ok) throw new Error(await res.text());
     const payload = await res.json();
@@ -96,9 +99,15 @@ async function loadSectors() {
     const prev = sel.value;
     sel.innerHTML = '<option value="">選擇產業...</option>' +
       sectorsData.map(s =>
-        `<option value="${s.industryCode}">${s.industryName}</option>`
+        `<option value="${s.industryCode}">(${s.industryCode}) ${s.industryName}</option>`
       ).join('');
-    if (prev) sel.value = prev;
+
+    const topIndustryCode = sectorsData[0]?.industryCode || '';
+    const useIndustryCode = sectorsData.some(s => s.industryCode === prev) ? prev : topIndustryCode;
+    sel.value = useIndustryCode;
+    if (useIndustryCode) {
+      await loadTreemap(useIndustryCode);
+    }
 
     document.getElementById('lastUpdate').textContent = buildSectorStatus(meta, days);
     document.getElementById('sectorStatus').textContent = buildSectorStatus(meta, days);
@@ -167,7 +176,7 @@ async function loadTreemap(industryCode) {
     treemapChart.showLoading({ text: '載入中...', color: '#3498db', textColor: '#888', maskColor: 'transparent' });
   }
   try {
-    const days = parseInt(document.getElementById('treemapPeriodSelect').value || '1', 10);
+    const days = getSelectedDays();
     const res = await fetch(`/api/sector/stocks/${industryCode}?days=${days}`);
     if (!res.ok) throw new Error(await res.text());
     const payload = await res.json();
@@ -189,9 +198,12 @@ function renderTreemap(stocks, industryCode, meta, days) {
   const sectorName = sectorsData.find(s => s.industryCode === industryCode)?.industryName ?? industryCode;
 
   const data = stocks.map(s => ({
-    name: s.name || s.symbol,
-    value: s.volume || 1,
-    label: { formatter: `{b}\n${s.changePercent != null ? (s.changePercent >= 0 ? '+' : '') + s.changePercent.toFixed(2) + '%' : '--'}` },
+    name: `${s.symbol || ''} ${s.name || ''}`.trim(),
+    value: Math.max(1, Math.sqrt(Number(s.volume || 0))),
+    rawVolume: Number(s.volume || 0),
+    symbol: s.symbol || '',
+    stockName: s.name || '',
+    label: { formatter: `${s.symbol ? `(${s.symbol})` : ''}\n${s.name || ''}\n${s.changePercent != null ? (s.changePercent >= 0 ? '+' : '') + s.changePercent.toFixed(2) + '%' : '--'}` },
     itemStyle: {
       color: s.changePercent == null ? '#555'
            : s.changePercent > 0 ? interpolateColor('#4caf50', '#e05c5c', 0)
@@ -221,13 +233,14 @@ function renderTreemap(stocks, industryCode, meta, days) {
       subtextStyle: { color: '#888', fontSize: 11 },
     },
     tooltip: {
-      formatter: p => `${p.name}<br/>漲跌幅：${p.data.changePercent != null ? p.data.changePercent.toFixed(2) + '%' : '--'}<br/>交易量：${(p.value / 1000).toFixed(0)}K`
+      formatter: p => `${p.data.symbol || ''} ${p.data.stockName || ''}<br/>漲跌幅：${p.data.changePercent != null ? p.data.changePercent.toFixed(2) + '%' : '--'}<br/>交易量：${(Number(p.data.rawVolume || 0) / 1000).toFixed(0)}K`
     },
     series: [{
       type: 'treemap',
-      data,
+      data: data.sort((a, b) => (b.rawVolume || 0) - (a.rawVolume || 0)),
       roam: false,
       nodeClick: false,
+      visibleMin: 0,
       breadcrumb: { show: false },
       label: { show: true, fontSize: 12, color: '#fff' },
       itemStyle: { borderColor: '#0f1117', borderWidth: 2, gapWidth: 2 },
