@@ -21,6 +21,23 @@
   .chart { width: 100%; }
   #sectorBarChart  { height: 480px; }
   #sectorTreemap   { height: 480px; }
+  .hover-preview {
+    margin-top: 10px;
+    border: 1px solid #2f3444;
+    border-radius: 10px;
+    background: #141824;
+    padding: 10px 12px;
+    min-height: 64px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+  }
+  .hover-preview .line1 { font-size: 1.05rem; color: #e8ebf3; font-weight: 600; }
+  .hover-preview .line2 { font-size: .85rem; color: #a8b0c2; }
+  .hover-preview .up { color: #ff6b6b; }
+  .hover-preview .down { color: #2ec7a3; }
+  .hover-preview .flat { color: #c0c3cc; }
   .loading { display: flex; align-items: center; justify-content: center; height: 100%; color: #555; font-size: .9rem; }
   .error { color: #e74c3c; font-size: .85rem; padding: 8px 0; }
 </style>
@@ -53,6 +70,10 @@
     </div>
     <div class="card-subtitle" id="treemapStatus">預設顯示漲幅最高產業</div>
     <div id="sectorTreemap" class="chart"></div>
+    <div id="treemapHoverPreview" class="hover-preview">
+      <div class="line1">滑鼠移到任一區塊可放大查看</div>
+      <div class="line2">小區塊可在此查看完整資訊</div>
+    </div>
   </div>
 </div>
 
@@ -244,9 +265,21 @@ function renderTreemap(stocks, industryCode, meta, days) {
       breadcrumb: { show: false },
       label: { show: true, fontSize: 12, color: '#fff' },
       itemStyle: { borderColor: '#0f1117', borderWidth: 2, gapWidth: 2 },
+      emphasis: {
+        focus: 'self',
+        label: { show: true, fontSize: 14, color: '#fff' },
+        itemStyle: {
+          borderColor: '#f5f7ff',
+          borderWidth: 3,
+          shadowBlur: 18,
+          shadowColor: 'rgba(255,255,255,0.25)'
+        }
+      },
       levels: [{ itemStyle: { borderColor: '#0f1117', borderWidth: 2 } }],
     }],
   });
+
+  bindTreemapHoverPreview();
 }
 
 function lerpColor(a, b, t) {
@@ -287,6 +320,37 @@ function buildTreemapStatus(meta, days) {
     return `近${meta.periodDays || days || 1}日｜區間 ${meta.historyStartDate || '--'} ～ ${meta.asOfDate || '--'}｜更新 ${formatDateText(meta.updatedAt)}`;
   }
   return `即時 snapshot｜更新 ${formatDateText(meta.updatedAt)}`;
+}
+
+function formatPctText(v) {
+  if (v == null || Number.isNaN(Number(v))) return '--';
+  const n = Number(v);
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+}
+
+function bindTreemapHoverPreview() {
+  const panel = document.getElementById('treemapHoverPreview');
+  if (!panel || !treemapChart) return;
+
+  treemapChart.off('mouseover');
+  treemapChart.off('globalout');
+
+  treemapChart.on('mouseover', params => {
+    const d = params?.data || {};
+    const cp = Number(d.changePercent);
+    const cls = Number.isNaN(cp) ? 'flat' : (cp > 0 ? 'up' : (cp < 0 ? 'down' : 'flat'));
+    panel.innerHTML = `
+      <div class="line1">(${d.symbol || '--'}) ${d.stockName || '--'} <span class="${cls}">${formatPctText(d.changePercent)}</span></div>
+      <div class="line2">交易量：${(Number(d.rawVolume || 0)).toLocaleString('zh-TW')}</div>
+    `;
+  });
+
+  treemapChart.on('globalout', () => {
+    panel.innerHTML = `
+      <div class="line1">滑鼠移到任一區塊可放大查看</div>
+      <div class="line2">小區塊可在此查看完整資訊</div>
+    `;
+  });
 }
 
 // 初始載入 + 自動更新（5分鐘）
