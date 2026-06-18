@@ -5,10 +5,14 @@ import tkinter as tk
 from tkinter import ttk
 from datetime import datetime
 import threading
+import time
 import os
 import concurrent.futures
 import sys
 import subprocess
+import json
+import urllib.parse
+import urllib.request
 
 
 def resolve_config_path():
@@ -68,6 +72,10 @@ if is_production:
         trade_sdk_init_error = str(e)
 INVENTORY_REFRESH_MS = 10000
 INVENTORY_BACKOFF_MS = 60000
+TG_NOTIFY_INTERVAL_MS = 10000
+TG_NOTIFY_DURATION_MS = 60000
+DEFAULT_TG_BOT_TOKEN = '8891183690:AAFO7_oSKS8O_GFD10mKqMRTks-f-7KFS5I'
+DEFAULT_TG_CHAT_ID = '888921358'
 
 LOG_DIR = r'D:\StockApiLog'
 if not os.path.exists(LOG_DIR):
@@ -76,6 +84,27 @@ if not os.path.exists(LOG_DIR):
 inventory_inflight = False
 last_quote_map = {}
 next_inventory_delay_ms = INVENTORY_REFRESH_MS
+tg_alert_lock = threading.Lock()
+tg_alert_state = {}
+alert_settings = {
+    'enabled': False,
+    'target_symbol': '全部',
+    'price': None,
+    'pct_abs': None,
+    'total_volume': None,
+    'single_volume': None,
+    'token': DEFAULT_TG_BOT_TOKEN,
+    'chat_id': DEFAULT_TG_CHAT_ID,
+}
+tg_enable_var = None
+target_symbol_var = None
+target_symbol_combo = None
+price_threshold_var = None
+pct_threshold_var = None
+total_volume_threshold_var = None
+single_volume_threshold_var = None
+tg_status_var = None
+last_chat_id_discovery_at = 0.0
 
 def write_log_batch(log_lines):
     if not log_lines:
@@ -146,6 +175,32 @@ def normalize_symbols_text(input_text):
 
     return ','.join(deduped)
 
+def sync_target_symbol_options(symbols):
+    if target_symbol_combo is None or target_symbol_var is None:
+        return
+
+    options = ['全部'] + symbols
+    current = target_symbol_var.get().strip() if target_symbol_var.get() else ''
+    target_symbol_combo['values'] = options
+
+    if current in options:
+        return
+
+    if symbols:
+        target_symbol_var.set(symbols[0])
+    else:
+        target_symbol_var.set('全部')
+
+def bind_tree_mousewheel(tree):
+    if tree is None:
+        return
+
+    def _on_mousewheel(event):
+        tree.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        return 'break'
+
+    tree.bind('<MouseWheel>', _on_mousewheel)
+
 def load_saved_watchlist():
     if not is_production:
         return DEFAULT_SIM_SYMBOLS
@@ -206,8 +261,10 @@ def on_close_app():
 
 def start_update():
     # 取得輸入框中的股票代號
+    refresh_alert_settings()
     input_txt = entry.get()
     symbols = [s.strip() for s in input_txt.split(',') if s.strip()]
+    sync_target_symbol_options(symbols)
     
     if not symbols:
         root.after(500, start_update)
@@ -242,6 +299,218 @@ def fmt_num(value, digits=2):
     if value is None:
         return '-'
     return f"{value:.{digits}f}"
+
+def safe_threshold_float(value):
+    text = str(value).strip() if value is not None else ''
+    if text == '':
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+def safe_threshold_int(value):
+    text = str(value).strip() if value is not None else ''
+    if text == '':
+        return None
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+def is_valid_chat_id(chat_id):
+    text = str(chat_id or '').strip()
+    if not text:
+        return False
+    if text.startswith('-'):
+        return text[1:].isdigit()
+    return text.isdigit()
+
+def discover_chat_id_from_updates(token):
+    if not token:
+        return None
+
+    url = f'https://api.telegram.org/bot{token}/getUpdates'
+    request_obj = urllib.request.Request(url, method='GET')
+
+    try:
+        with urllib.request.urlopen(request_obj, timeout=10) as response:
+            body = response.read().decode('utf-8', errors='ignore')
+            result = json.loads(body) if body else {}
+            if not result.get('ok'):
+                return None
+            updates = result.get('result') or []
+            if not updates:
+                return None
+
+            latest = updates[-1]
+            message = latest.get('message') or latest.get('channel_post') or {}
+            chat = message.get('chat') or {}
+            chat_id = chat.get('id')
+            return str(chat_id) if chat_id is not None else None
+    except Exception:
+        return None
+
+def refresh_alert_settings():
+    global alert_settings, last_chat_id_discovery_at
+    resolved_chat_id = (DEFAULT_TG_CHAT_ID or '').strip()
+    now = time.time()
+    if not is_valid_chat_id(resolved_chat_id) and (now - last_chat_id_discovery_at) > 30:
+        discovered = discover_chat_id_from_updates(DEFAULT_TG_BOT_TOKEN)
+        last_chat_id_discovery_at = now
+        if discovered and is_valid_chat_id(discovered):
+            resolved_chat_id = discovered
+
+    alert_settings = {
+        'enabled': bool(tg_enable_var.get()) if tg_enable_var is not None else False,
+        'target_symbol': (target_symbol_var.get().strip() if target_symbol_var is not None else '全部') or '全部',
+        'price': safe_threshold_float(price_threshold_var.get() if price_threshold_var is not None else ''),
+        'pct_abs': safe_threshold_float(pct_threshold_var.get() if pct_threshold_var is not None else ''),
+        'total_volume': safe_threshold_int(total_volume_threshold_var.get() if total_volume_threshold_var is not None else ''),
+        'single_volume': safe_threshold_int(single_volume_threshold_var.get() if single_volume_threshold_var is not None else ''),
+        'token': DEFAULT_TG_BOT_TOKEN,
+        'chat_id': resolved_chat_id,
+    }
+
+def update_tg_status(text):
+    if tg_status_var is None:
+        return
+    root.after(0, lambda: tg_status_var.set(text))
+
+def send_telegram_message(text):
+    token = alert_settings.get('token') or ''
+    chat_id = alert_settings.get('chat_id') or ''
+    if not token:
+        return False, 'Telegram Token 未設定'
+    if not is_valid_chat_id(chat_id):
+        return False, 'Chat ID 無效。請先對 Bot 發 /start 或在群組發言，讓程式可從 getUpdates 自動取得 Chat ID'
+
+    url = f'https://api.telegram.org/bot{token}/sendMessage'
+    payload = {
+        'chat_id': chat_id,
+        'text': text,
+    }
+    data = urllib.parse.urlencode(payload).encode('utf-8')
+    request_obj = urllib.request.Request(url, data=data, method='POST')
+
+    try:
+        with urllib.request.urlopen(request_obj, timeout=10) as response:
+            body = response.read().decode('utf-8', errors='ignore')
+            result = json.loads(body) if body else {}
+            if result.get('ok'):
+                return True, 'ok'
+            return False, str(result)
+    except Exception as e:
+        return False, str(e)
+
+def extract_quote_metrics(quote, price, pct_change):
+    total_volume = safe_int(
+        quote.get('tradeVolume')
+        or quote.get('totalVolume')
+        or quote.get('volume')
+        or quote.get('accumulateVolume')
+    )
+    single_volume = safe_int(
+        quote.get('tradeQty')
+        or quote.get('lastSize')
+        or quote.get('lastQty')
+        or quote.get('size')
+    )
+    return {
+        'price': safe_float(price),
+        'pct_change': safe_float(pct_change),
+        'total_volume': total_volume,
+        'single_volume': single_volume,
+    }
+
+def get_trigger_reasons(metrics):
+    reasons = []
+    p = alert_settings.get('price')
+    pct_abs = alert_settings.get('pct_abs')
+    tv = alert_settings.get('total_volume')
+    sv = alert_settings.get('single_volume')
+
+    if p is not None and metrics.get('price') is not None and metrics.get('price') >= p:
+        reasons.append(f"成交價 {metrics.get('price'):.2f} >= {p:.2f}")
+    if pct_abs is not None and metrics.get('pct_change') is not None and abs(metrics.get('pct_change')) >= pct_abs:
+        reasons.append(f"漲跌幅 {metrics.get('pct_change'):.2f}% >= ±{pct_abs:.2f}%")
+    if tv is not None and metrics.get('total_volume', 0) >= tv:
+        reasons.append(f"總量 {metrics.get('total_volume', 0):,} >= {tv:,}")
+    if sv is not None and metrics.get('single_volume', 0) >= sv:
+        reasons.append(f"單量 {metrics.get('single_volume', 0):,} >= {sv:,}")
+
+    return reasons
+
+def register_alert_if_needed(symbol, name, metrics, reasons):
+    if not reasons:
+        return
+
+    now = time.time()
+    with tg_alert_lock:
+        state = tg_alert_state.get(symbol)
+        if state is None:
+            tg_alert_state[symbol] = {
+                'symbol': symbol,
+                'name': name,
+                'metrics': metrics,
+                'reasons': reasons,
+                'next_send': now,
+                'end_at': now + (TG_NOTIFY_DURATION_MS / 1000.0),
+            }
+        else:
+            state['name'] = name
+            state['metrics'] = metrics
+            state['reasons'] = reasons
+            state['end_at'] = max(state['end_at'], now + (TG_NOTIFY_DURATION_MS / 1000.0))
+
+def flush_alert_notifications(latest_metrics_map):
+    if not alert_settings.get('enabled'):
+        return
+
+    now = time.time()
+    to_remove = []
+
+    with tg_alert_lock:
+        items = list(tg_alert_state.items())
+
+    for symbol, state in items:
+        if now > state.get('end_at', 0):
+            to_remove.append(symbol)
+            continue
+
+        if now < state.get('next_send', 0):
+            continue
+
+        latest = latest_metrics_map.get(symbol, state.get('metrics', {}))
+        name = state.get('name', 'N/A')
+        pct = latest.get('pct_change')
+        pct_text = '-' if pct is None else f"{pct:+.2f}%"
+        text = (
+            f"📢 觸發監控條件\n"
+            f"代號：{symbol}\n"
+            f"名稱：{name}\n"
+            f"成交價：{fmt_num(latest.get('price'))}\n"
+            f"漲跌幅：{pct_text}\n"
+            f"總量：{latest.get('total_volume', 0):,}\n"
+            f"單量：{latest.get('single_volume', 0):,}\n"
+            f"條件：{'; '.join(state.get('reasons', []))}"
+        )
+        ok, msg = send_telegram_message(text)
+        if ok:
+            update_tg_status(f"TG 通知成功：{symbol} {datetime.now().strftime('%H:%M:%S')}")
+        else:
+            update_tg_status(f"TG 通知失敗：{msg}")
+
+        with tg_alert_lock:
+            current = tg_alert_state.get(symbol)
+            if current is not None:
+                current['metrics'] = latest
+                current['next_send'] = now + (TG_NOTIFY_INTERVAL_MS / 1000.0)
+
+    if to_remove:
+        with tg_alert_lock:
+            for symbol in to_remove:
+                tg_alert_state.pop(symbol, None)
 
 def invoke_sdk_method(path, *args, **kwargs):
     obj = marketdata_sdk
@@ -344,6 +613,7 @@ def build_inventory_rows(inventory_items):
 def fetch_data(symbols):
     results = []
     log_lines = []
+    latest_metrics_map = {}
     
     # 1. 使用 ThreadPool 行平行查詢，大幅縮短整體等待時間
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(symbols))) as executor:
@@ -371,6 +641,7 @@ def fetch_data(symbols):
             
             tag = 'equal'
             pct_change_str = "0.00%"
+            pct_change_val = 0.0
 
             if change is not None:
                 if change > 0: tag = 'up'
@@ -378,7 +649,22 @@ def fetch_data(symbols):
                 
                 previous_close = price - change
                 if previous_close != 0:
-                    pct_change_str = f"{(change / previous_close) * 100:.2f}%"
+                    pct_change_val = (change / previous_close) * 100
+                    pct_change_str = f"{pct_change_val:.2f}%"
+
+            metrics = extract_quote_metrics(quote, price, pct_change_val)
+            latest_metrics_map[symbol] = {
+                'price': metrics.get('price'),
+                'pct_change': metrics.get('pct_change'),
+                'total_volume': metrics.get('total_volume'),
+                'single_volume': metrics.get('single_volume'),
+            }
+
+            reasons = get_trigger_reasons(metrics)
+            selected_target = alert_settings.get('target_symbol', '全部')
+            target_match = (selected_target in ('', '全部')) or (symbol == selected_target)
+            if reasons and target_match:
+                register_alert_if_needed(symbol, name, latest_metrics_map[symbol], reasons)
             
             results.append((symbol, name, price, change, pct_change_str, current_time, tag))
             
@@ -391,6 +677,7 @@ def fetch_data(symbols):
     # 資料獲取完畢後，通知主執行緒更新 UI，並提供 symbols 比對避免閃爍
     root.after(0, update_quote_ui, results, symbols)
     update_quote_cache({r[0]: {'closePrice': r[2], 'name': r[1]} for r in results})
+    flush_alert_notifications(latest_metrics_map)
 
 def start_inventory_update():
     if not is_production:
@@ -614,6 +901,9 @@ notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 quote_tab = tk.Frame(notebook, bg='black')
 notebook.add(quote_tab, text='即時報價')
 
+notify_tab = tk.Frame(notebook, bg='black')
+notebook.add(notify_tab, text='通知設定')
+
 inventory_tab = None
 if is_production:
     inventory_tab = tk.Frame(notebook, bg='black')
@@ -638,7 +928,45 @@ if is_production:
     )
     save_button.pack(side=tk.LEFT, padx=5)
 
-quote_tree = ttk.Treeview(quote_tab, columns=('Symbol', 'Name', 'Price', 'Change', 'PctChange', 'Time'), show='headings')
+alert_frame = tk.Frame(notify_tab, bg='black')
+alert_frame.pack(fill=tk.X, padx=10, pady=(10, 6))
+
+tg_enable_var = tk.BooleanVar(value=False)
+target_symbol_var = tk.StringVar(value='全部')
+price_threshold_var = tk.StringVar(value='')
+pct_threshold_var = tk.StringVar(value='')
+total_volume_threshold_var = tk.StringVar(value='')
+single_volume_threshold_var = tk.StringVar(value='')
+tg_status_var = tk.StringVar(value='TG 通知：未啟用（Token/ChatID 由程式內常數提供）')
+
+for col in range(8):
+    alert_frame.grid_columnconfigure(col, weight=0)
+alert_frame.grid_columnconfigure(7, weight=1)
+
+tk.Checkbutton(alert_frame, text='啟用 TG 通知', variable=tg_enable_var, bg='black', fg='white', selectcolor='#222222').grid(row=0, column=0, padx=(0, 8), sticky='w')
+tk.Label(alert_frame, text='目標股票', bg='black', fg='white').grid(row=0, column=1, sticky='e')
+target_symbol_combo = ttk.Combobox(alert_frame, width=10, state='readonly', textvariable=target_symbol_var, values=['全部'])
+target_symbol_combo.grid(row=0, column=2, padx=(4, 10), sticky='w')
+
+tk.Label(alert_frame, text='成交價>=', bg='black', fg='white').grid(row=0, column=3, sticky='e')
+tk.Entry(alert_frame, width=8, textvariable=price_threshold_var, bg='#222222', fg='white', insertbackground='white').grid(row=0, column=4, padx=(4, 10))
+tk.Label(alert_frame, text='漲跌幅>=', bg='black', fg='white').grid(row=0, column=5, sticky='e')
+tk.Entry(alert_frame, width=8, textvariable=pct_threshold_var, bg='#222222', fg='white', insertbackground='white').grid(row=0, column=6, padx=(4, 2))
+tk.Label(alert_frame, text='%', bg='black', fg='white').grid(row=0, column=7, sticky='w')
+
+tk.Label(alert_frame, text='總量>=', bg='black', fg='white').grid(row=1, column=1, sticky='e', pady=(6, 0))
+tk.Entry(alert_frame, width=10, textvariable=total_volume_threshold_var, bg='#222222', fg='white', insertbackground='white').grid(row=1, column=2, padx=(4, 10), sticky='w', pady=(6, 0))
+tk.Label(alert_frame, text='單量>=', bg='black', fg='white').grid(row=1, column=3, sticky='e', pady=(6, 0))
+tk.Entry(alert_frame, width=10, textvariable=single_volume_threshold_var, bg='#222222', fg='white', insertbackground='white').grid(row=1, column=4, padx=(4, 10), sticky='w', pady=(6, 0))
+tk.Label(alert_frame, text='達標後每10秒通知，持續1分鐘', bg='black', fg='yellow').grid(row=1, column=5, columnspan=3, sticky='w', pady=(6, 0))
+
+tg_status_label = tk.Label(notify_tab, textvariable=tg_status_var, bg='black', fg='yellow', anchor='w')
+tg_status_label.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+quote_tree_frame = tk.Frame(quote_tab, bg='black')
+quote_tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+quote_tree = ttk.Treeview(quote_tree_frame, columns=('Symbol', 'Name', 'Price', 'Change', 'PctChange', 'Time'), show='headings')
 quote_tree.heading('Symbol', text='代號', command=lambda: on_heading_click('Symbol'))
 quote_tree.heading('Name', text='名稱', command=lambda: on_heading_click('Name'))
 quote_tree.heading('Price', text='成交價', command=lambda: on_heading_click('Price'))
@@ -657,15 +985,23 @@ quote_tree.tag_configure('up', foreground='red')
 quote_tree.tag_configure('down', foreground='green')
 quote_tree.tag_configure('equal', foreground='white')
 
-quote_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+quote_scrollbar = ttk.Scrollbar(quote_tree_frame, orient='vertical', command=quote_tree.yview)
+quote_tree.configure(yscrollcommand=quote_scrollbar.set)
+
+quote_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+quote_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+bind_tree_mousewheel(quote_tree)
 
 if is_production:
     inventory_status_var = tk.StringVar(value='庫存尚未更新')
     inventory_status_label = tk.Label(inventory_tab, textvariable=inventory_status_var, bg='black', fg='white', anchor='w')
     inventory_status_label.pack(fill=tk.X, padx=10, pady=(10, 0))
 
+    inventory_tree_frame = tk.Frame(inventory_tab, bg='black')
+    inventory_tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
     inventory_tree = ttk.Treeview(
-        inventory_tab,
+        inventory_tree_frame,
         columns=('Symbol', 'Name', 'Qty', 'Unrealized', 'ReturnRate', 'Time'),
         show='headings'
     )
@@ -687,7 +1023,12 @@ if is_production:
     inventory_tree.tag_configure('down', foreground='green')
     inventory_tree.tag_configure('equal', foreground='white')
 
-    inventory_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    inventory_scrollbar = ttk.Scrollbar(inventory_tree_frame, orient='vertical', command=inventory_tree.yview)
+    inventory_tree.configure(yscrollcommand=inventory_scrollbar.set)
+
+    inventory_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    inventory_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    bind_tree_mousewheel(inventory_tree)
 
 start_update()
 if is_production:
