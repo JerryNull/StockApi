@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>股價查詢</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #f0f2f5; color: #1a1a2e; min-height: 100vh; }
+  .header { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: white; padding: 24px 32px; display: flex; align-items: center;
+            justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  .header h1 { font-size: 1.4rem; font-weight: 600; }
+  .refresh-time { font-size: 0.75rem; opacity: 0.5; }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+
+  .card { background: white; border-radius: 12px; padding: 20px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 16px; }
+  .card h2 { font-size: 0.9rem; font-weight: 600; margin-bottom: 14px; color: #1a1a2e; }
+
+  .watchlist-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .watchlist-row input { flex: 1; min-width: 200px; padding: 8px 12px;
+    border: 1.5px solid #e5e7eb; border-radius: 7px; font-size: 0.9rem; outline: none; }
+  .watchlist-row input:focus { border-color: #6366f1; }
+  .btn { display: inline-flex; align-items: center; padding: 8px 16px;
+         border-radius: 7px; font-size: 0.82rem; font-weight: 600;
+         border: none; cursor: pointer; transition: opacity .15s; }
+  .btn:hover { opacity: 0.82; }
+  .btn-primary { background: #6366f1; color: white; }
+  .btn-sm { padding: 4px 10px; font-size: 0.75rem; }
+  .btn-danger  { background: #ef4444; color: white; }
+  .btn-outline { background: transparent; border: 1.5px solid #6366f1; color: #6366f1; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th { text-align: right; padding: 8px 12px; color: #888; font-weight: 600;
+       border-bottom: 2px solid #f0f0f0; white-space: nowrap; }
+  th:first-child, th:last-child { text-align: left; }
+  td { padding: 10px 12px; border-bottom: 1px solid #f5f5f5; text-align: right; }
+  td:first-child, td:last-child { text-align: left; }
+  tr:hover td { background: #fafafa; }
+  .stk-name { font-weight: 600; font-size: 0.9rem; }
+  .stk-no   { font-size: 0.72rem; color: #aaa; }
+  .pos { color: #ef4444; }
+  .neg { color: #22c55e; }
+
+  .alert-badge { display: inline-block; padding: 2px 7px; border-radius: 4px;
+                 font-size: 0.72rem; font-weight: 600; margin-right: 4px; }
+  .alert-on  { background: #fef9c3; color: #854d0e; }
+  .alert-hit { background: #dcfce7; color: #166534; }
+  .alert-set-btn { font-size: 0.72rem; padding: 3px 8px; background: #f3f4f6;
+                   border: none; border-radius: 4px; cursor: pointer; color: #555; font-weight: 600; }
+  .alert-set-btn:hover { background: #e5e7eb; }
+
+  .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45);
+             z-index: 100; align-items: center; justify-content: center; padding: 12px; }
+  .overlay.open { display: flex; }
+  .modal { background: white; border-radius: 14px; padding: 28px; width: 100%;
+           max-width: 380px; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
+  .modal h3 { font-size: 1rem; font-weight: 700; margin-bottom: 18px; }
+  .form-group { margin-bottom: 14px; }
+  .form-group label { display: block; font-size: 0.78rem; font-weight: 600;
+                      color: #555; margin-bottom: 5px; }
+  .form-group input, .form-group select { width: 100%; padding: 8px 12px;
+    border: 1.5px solid #e5e7eb; border-radius: 7px; font-size: 0.9rem; outline: none; }
+  .form-group input:focus, .form-group select:focus { border-color: #6366f1; }
+  .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+
+  .empty { text-align: center; color: #aaa; padding: 32px; font-size: 0.9rem; }
+
+  @media (max-width: 600px) {
+    .header { padding: 16px; }
+    .container { padding: 12px 10px; }
+    table { font-size: 0.78rem; }
+    th, td { padding: 8px 6px; }
+  }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>📈 股價查詢</h1>
+  <div style="display:flex;align-items:center;gap:16px;">
+    <div class="refresh-time" id="refreshTime">自動更新中...</div>
+    <a href="inventory" style="display:inline-flex;align-items:center;gap:6px;padding:7px 16px;
+       background:rgba(255,255,255,0.15);color:white;border-radius:8px;text-decoration:none;
+       font-size:0.85rem;font-weight:600;">📦 庫存</a>
+  </div>
+</div>
+
+<div class="container">
+  <div class="card">
+    <h2>自選股</h2>
+    <div class="watchlist-row">
+      <input id="watchlistInput" type="text" placeholder="輸入股票代號，逗號分隔，例：2330,2317,0050">
+      <button class="btn btn-primary" onclick="saveWatchlist()">儲存</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>即時行情</h2>
+    <div id="priceArea"><div class="empty">載入中...</div></div>
+  </div>
+</div>
+
+<!-- 到價通知 Modal -->
+<div class="overlay" id="alertOverlay" onclick="overlayClick(event)">
+  <div class="modal">
+    <h3 id="alertModalTitle">設定到價通知</h3>
+    <div class="form-group">
+      <label>目標價格</label>
+      <input id="alertTarget" type="number" step="0.01" placeholder="例：500">
+    </div>
+    <div class="form-group">
+      <label>通知方向</label>
+      <select id="alertDirection">
+        <option value="above">達到或高於目標價（漲到）</option>
+        <option value="below">達到或低於目標價（跌到）</option>
+      </select>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger btn-sm" id="alertDeleteBtn" onclick="deleteAlert()" style="margin-right:auto;">移除通知</button>
+      <button class="btn btn-outline" onclick="closeAlertModal()">取消</button>
+      <button class="btn btn-primary" onclick="saveAlert()">儲存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let _alertSymbol = '';
+let _prices = [];
+
+async function loadWatchlist() {
+  const res = await fetch('api/watchlist');
+  const symbols = await res.json();
+  document.getElementById('watchlistInput').value = symbols.join(',');
+}
+
+async function saveWatchlist() {
+  const input = document.getElementById('watchlistInput').value;
+  const symbols = input.split(',').map(s => s.trim()).filter(Boolean);
+  await fetch('api/watchlist', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({symbols})
+  });
+  refresh();
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('api/prices');
+    _prices = await res.json();
+    renderPrices(_prices);
+    document.getElementById('refreshTime').textContent =
+      '更新於 ' + new Date().toLocaleTimeString('zh-TW');
+  } catch(e) { console.error(e); }
+}
+
+function renderPrices(prices) {
+  const el = document.getElementById('priceArea');
+  if (!prices.length) {
+    el.innerHTML = '<div class="empty">請先輸入自選股代號</div>';
+    return;
+  }
+  const rows = prices.map(p => {
+    if (p.error) return `<tr><td colspan="7" style="color:#ef4444">${p.symbol}：${p.error}</td></tr>`;
+    const price = p.lastPrice ?? p.closePrice ?? '-';
+    const chg   = p.change ?? 0;
+    const pct   = p.changePercent ?? 0;
+    const cls   = chg > 0 ? 'pos' : chg < 0 ? 'neg' : '';
+    const sign  = chg > 0 ? '+' : '';
+    const alert = p.alert;
+    let alertHtml = '';
+    if (alert) {
+      const icon  = alert.direction === 'above' ? '▲' : '▼';
+      const cls2  = alert.triggered ? 'alert-hit' : 'alert-on';
+      const label = alert.triggered ? '已觸發' : `${icon} ${alert.target}`;
+      alertHtml = `<span class="alert-badge ${cls2}">${label}</span>`;
+    }
+    return `<tr>
+      <td><div class="stk-name">${p.name}</div><div class="stk-no">${p.symbol}</div></td>
+      <td class="${cls}">${price}</td>
+      <td class="${cls}">${sign}${chg}</td>
+      <td class="${cls}">${sign}${typeof pct === 'number' ? pct.toFixed(2) : pct}%</td>
+      <td>${p.highPrice ?? '-'}</td>
+      <td>${p.lowPrice ?? '-'}</td>
+      <td>${alertHtml}<button class="alert-set-btn" onclick="openAlertModal('${p.symbol}','${p.name}',${price})">🔔</button></td>
+    </tr>`;
+  }).join('');
+
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>股票</th><th>現價</th><th>漲跌</th><th>漲跌%</th><th>最高</th><th>最低</th><th>通知</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function openAlertModal(symbol, name, currentPrice) {
+  _alertSymbol = symbol;
+  document.getElementById('alertModalTitle').textContent = `到價通知：${name}（${symbol}）`;
+  const existing = _prices.find(p => p.symbol === symbol)?.alert;
+  document.getElementById('alertTarget').value    = existing ? existing.target : currentPrice;
+  document.getElementById('alertDirection').value = existing ? existing.direction : 'above';
+  document.getElementById('alertDeleteBtn').style.display = existing ? '' : 'none';
+  document.getElementById('alertOverlay').classList.add('open');
+}
+
+function closeAlertModal() {
+  document.getElementById('alertOverlay').classList.remove('open');
+}
+
+function overlayClick(e) {
+  if (e.target === document.getElementById('alertOverlay')) closeAlertModal();
+}
+
+async function saveAlert() {
+  const target    = parseFloat(document.getElementById('alertTarget').value);
+  const direction = document.getElementById('alertDirection').value;
+  if (isNaN(target)) { alert('請輸入有效價格'); return; }
+  await fetch(`api/alerts/${_alertSymbol}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({target, direction})
+  });
+  closeAlertModal();
+  refresh();
+}
+
+async function deleteAlert() {
+  await fetch(`api/alerts/${_alertSymbol}`, {method: 'DELETE'});
+  closeAlertModal();
+  refresh();
+}
+
+loadWatchlist();
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>
