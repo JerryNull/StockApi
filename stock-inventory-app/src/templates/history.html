@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>資產曲線</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #f0f2f5; color: #1a1a2e; min-height: 100vh; }
+  .header { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: white; padding: 24px 32px; display: flex; align-items: center;
+            justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  .header h1 { font-size: 1.4rem; font-weight: 600; }
+  .nav-links { display: flex; gap: 8px; }
+  .nav-btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 16px;
+             background: rgba(255,255,255,0.15); color: white; border-radius: 8px;
+             text-decoration: none; font-size: 0.85rem; font-weight: 600; border: none; cursor: pointer; }
+  .container { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
+  .card { background: white; border-radius: 12px; padding: 20px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 16px; }
+  .card-header { display: flex; align-items: center; justify-content: space-between;
+                 margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
+  .card-header h2 { font-size: 0.95rem; font-weight: 600; }
+  .days-btns { display: flex; gap: 6px; }
+  .day-btn { padding: 4px 12px; border-radius: 6px; border: 1.5px solid #e5e7eb;
+             background: white; font-size: 0.8rem; font-weight: 600; cursor: pointer; color: #555; }
+  .day-btn.active { background: #6366f1; color: white; border-color: #6366f1; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+             gap: 14px; margin-bottom: 16px; }
+  .stat { background: white; border-radius: 12px; padding: 16px 20px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .stat .label { font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+                 letter-spacing: .05em; color: #888; margin-bottom: 6px; }
+  .stat .value { font-size: 1.2rem; font-weight: 700; }
+  .stat .sub { font-size: 0.72rem; color: #888; margin-top: 4px; }
+  .pos { color: #ef4444; }
+  .neg { color: #22c55e; }
+  #chart { width: 100%; height: 360px; }
+  .empty { text-align: center; color: #aaa; padding: 60px; font-size: 0.9rem; }
+  .snapshot-btn { padding: 6px 14px; background: #6366f1; color: white;
+                  border: none; border-radius: 7px; font-size: 0.8rem;
+                  font-weight: 600; cursor: pointer; }
+  .snapshot-btn:disabled { opacity: 0.5; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>📈 資產曲線</h1>
+  <div class="nav-links">
+    <a href="." class="nav-btn">← 股價查詢</a>
+    <a href="inventory" class="nav-btn">📦 庫存</a>
+  </div>
+</div>
+
+<div class="container">
+  <div class="summary" id="summaryCards">
+    <div class="stat"><div class="label">載入中</div><div class="value">—</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>每日總市值 &amp; 損益</h2>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="days-btns">
+          <button class="day-btn active" onclick="loadData(30,this)">30天</button>
+          <button class="day-btn" onclick="loadData(60,this)">60天</button>
+          <button class="day-btn" onclick="loadData(90,this)">90天</button>
+        </div>
+        <button class="snapshot-btn" id="snapBtn" onclick="takeSnapshot()">立即快照</button>
+      </div>
+    </div>
+    <div id="chart"></div>
+  </div>
+
+  <!-- 每檔損益表 -->
+  <div class="card" id="stockCard" style="display:none;">
+    <div class="card-header">
+      <h2>每檔損益明細</h2>
+      <div id="stockTabs" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+    </div>
+    <!-- 個股曲線 -->
+    <div id="stockChartWrap" style="display:none;margin-bottom:16px;">
+      <div id="stockChart" style="width:100%;height:260px;"></div>
+    </div>
+    <!-- 總覽表格 -->
+    <div id="stockTableWrap" style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:0.83rem;">
+        <thead id="stockThead"></thead>
+        <tbody id="stockTbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const chart = echarts.init(document.getElementById('chart'));
+let stockChart = null;
+let _data = [];
+let _stocksData = {};
+let _currentDays = 30;
+let _activeStock = null;
+
+async function loadData(days, btn) {
+  _currentDays = days;
+  document.querySelectorAll('.day-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+
+  chart.showLoading({ text: '載入中...', maskColor: 'transparent', color: '#6366f1', textColor: '#888' });
+  const [res, resStocks] = await Promise.all([
+    fetch(`api/history?days=${days}`),
+    fetch(`api/history/stocks?days=${days}`)
+  ]);
+  _data = await res.json();
+  _stocksData = await resStocks.json();
+  chart.hideLoading();
+
+  renderStockTable(_stocksData);
+
+  if (!_data.length) {
+    chart.setOption({ title: { text: '尚無資料，請等收盤後自動快照或點「立即快照」', left: 'center', top: 'center', textStyle: { color: '#aaa', fontSize: 14 } } });
+    renderSummary([]);
+    return;
+  }
+  renderChart(_data);
+  renderSummary(_data);
+}
+
+function renderChart(data) {
+  const dates   = data.map(d => d.date);
+  const values  = data.map(d => d.total_value);
+  const profits = data.map(d => d.total_profit);
+
+  chart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'axis',
+      formatter: params => {
+        const d = params[0].dataIndex;
+        const row = data[d];
+        const pct = row.total_cost ? (row.total_profit / row.total_cost * 100).toFixed(2) : '—';
+        return `${row.date}<br/>
+                市值：${row.total_value.toLocaleString('zh-TW')}<br/>
+                損益：<span style="color:${row.total_profit>=0?'#ef4444':'#22c55e'}">${row.total_profit>=0?'+':''}${row.total_profit.toLocaleString('zh-TW')}</span>（${pct}%）`;
+      }
+    },
+    legend: { data: ['總市值', '未實現損益'], top: 4 },
+    grid: { left: 70, right: 20, top: 40, bottom: 40 },
+    xAxis: { type: 'category', data: dates, axisLabel: { color: '#888', fontSize: 11, rotate: dates.length > 20 ? 30 : 0 } },
+    yAxis: [
+      { type: 'value', name: '市值', axisLabel: { color: '#888', formatter: v => (v/10000).toFixed(0) + '萬' }, splitLine: { lineStyle: { color: '#f0f0f0' } } },
+      { type: 'value', name: '損益', axisLabel: { color: '#888', formatter: v => (v/10000).toFixed(0) + '萬' }, splitLine: { show: false } },
+    ],
+    series: [
+      {
+        name: '總市值', type: 'line', yAxisIndex: 0, data: values,
+        smooth: true, symbol: 'none',
+        lineStyle: { color: '#6366f1', width: 2 },
+        areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(99,102,241,0.2)' }, { offset: 1, color: 'rgba(99,102,241,0)' }] } }
+      },
+      {
+        name: '未實現損益', type: 'bar', yAxisIndex: 1, data: profits,
+        itemStyle: { color: p => p.value >= 0 ? '#fca5a5' : '#86efac' },
+        barMaxWidth: 20,
+      }
+    ]
+  });
+}
+
+function renderSummary(data) {
+  if (!data.length) {
+    document.getElementById('summaryCards').innerHTML = '<div class="stat"><div class="label">暫無資料</div><div class="value">—</div></div>';
+    return;
+  }
+  const latest = data[data.length - 1];
+  const first  = data[0];
+  const pct = latest.total_cost ? (latest.total_profit / latest.total_cost * 100) : 0;
+  const valueChg = latest.total_value - first.total_value;
+
+  document.getElementById('summaryCards').innerHTML = `
+    <div class="stat">
+      <div class="label">最新市值</div>
+      <div class="value">${latest.total_value.toLocaleString('zh-TW')}</div>
+      <div class="sub">元（${latest.date}）</div>
+    </div>
+    <div class="stat">
+      <div class="label">未實現損益</div>
+      <div class="value ${latest.total_profit >= 0 ? 'pos' : 'neg'}">${latest.total_profit >= 0 ? '+' : ''}${latest.total_profit.toLocaleString('zh-TW')}</div>
+      <div class="sub ${latest.total_profit >= 0 ? 'pos' : 'neg'}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</div>
+    </div>
+    <div class="stat">
+      <div class="label">期間市值變化</div>
+      <div class="value ${valueChg >= 0 ? 'pos' : 'neg'}">${valueChg >= 0 ? '+' : ''}${valueChg.toLocaleString('zh-TW')}</div>
+      <div class="sub">${first.date} ~ ${latest.date}</div>
+    </div>
+    <div class="stat">
+      <div class="label">快照天數</div>
+      <div class="value">${data.length}</div>
+      <div class="sub">筆記錄</div>
+    </div>
+  `;
+}
+
+function renderStockTable(stocks) {
+  const card = document.getElementById('stockCard');
+  const symbols = Object.keys(stocks);
+  if (!symbols.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+
+  // 渲染切換 tabs
+  const tabsEl = document.getElementById('stockTabs');
+  tabsEl.innerHTML = `
+    <button class="day-btn ${_activeStock === null ? 'active' : ''}" onclick="selectStock(null, this)">總覽</button>
+    ${symbols.map(sym =>
+      `<button class="day-btn ${_activeStock === sym ? 'active' : ''}" onclick="selectStock('${sym}', this)">${stocks[sym].name}</button>`
+    ).join('')}
+  `;
+
+  if (_activeStock && stocks[_activeStock]) {
+    renderSingleStockChart(_activeStock, stocks[_activeStock]);
+    document.getElementById('stockChartWrap').style.display = '';
+    document.getElementById('stockTableWrap').style.display = 'none';
+  } else {
+    document.getElementById('stockChartWrap').style.display = 'none';
+    document.getElementById('stockTableWrap').style.display = '';
+    renderStockOverviewTable(symbols, stocks);
+  }
+}
+
+function selectStock(sym, btn) {
+  _activeStock = sym;
+  document.querySelectorAll('#stockTabs .day-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+
+  if (sym && _stocksData[sym]) {
+    renderSingleStockChart(sym, _stocksData[sym]);
+    document.getElementById('stockChartWrap').style.display = '';
+    document.getElementById('stockTableWrap').style.display = 'none';
+  } else {
+    document.getElementById('stockChartWrap').style.display = 'none';
+    document.getElementById('stockTableWrap').style.display = '';
+    renderStockOverviewTable(Object.keys(_stocksData), _stocksData);
+  }
+}
+
+function renderSingleStockChart(sym, s) {
+  if (!stockChart) {
+    stockChart = echarts.init(document.getElementById('stockChart'));
+  }
+  const dates   = s.data.map(d => d.date);
+  const profits = s.data.map(d => d.profit);
+  const values  = s.data.map(d => d.value);
+  const latest  = profits[profits.length - 1] ?? 0;
+
+  stockChart.setOption({
+    backgroundColor: 'transparent',
+    title: {
+      text: `${s.name}（${sym}）損益走勢`,
+      textStyle: { fontSize: 13, color: '#333' }, left: 'center'
+    },
+    tooltip: {
+      trigger: 'axis',
+      formatter: p => {
+        const i = p[0].dataIndex;
+        const pSign = profits[i] >= 0 ? '+' : '';
+        return `${dates[i]}<br/>市值：${values[i].toLocaleString('zh-TW')}<br/>損益：<span style="color:${profits[i]>=0?'#ef4444':'#22c55e'}">${pSign}${profits[i].toLocaleString('zh-TW')}</span>`;
+      }
+    },
+    grid: { left: 70, right: 20, top: 50, bottom: 30 },
+    xAxis: { type: 'category', data: dates, axisLabel: { color: '#888', fontSize: 11 } },
+    yAxis: { type: 'value', axisLabel: { color: '#888', formatter: v => v.toLocaleString('zh-TW') }, splitLine: { lineStyle: { color: '#f0f0f0' } } },
+    series: [{
+      type: 'bar',
+      data: profits.map(v => ({ value: v, itemStyle: { color: v >= 0 ? '#fca5a5' : '#86efac' } })),
+      barMaxWidth: 30,
+      label: { show: profits.length <= 10, position: p => p.value >= 0 ? 'top' : 'bottom', formatter: p => (p.value >= 0 ? '+' : '') + p.value.toLocaleString('zh-TW'), fontSize: 11, color: '#666' }
+    }]
+  });
+  window.addEventListener('resize', () => stockChart?.resize());
+}
+
+function renderStockOverviewTable(symbols, stocks) {
+  const allDates = [...new Set(
+    symbols.flatMap(s => stocks[s].data.map(d => d.date))
+  )].sort();
+
+  document.getElementById('stockThead').innerHTML = `<tr>
+    <th style="text-align:left;padding:8px 12px;color:#888;border-bottom:2px solid #f0f0f0;white-space:nowrap;">股票</th>
+    ${allDates.map(d => `<th style="text-align:right;padding:8px 12px;color:#888;border-bottom:2px solid #f0f0f0;white-space:nowrap;">${d.slice(5)}</th>`).join('')}
+    <th style="text-align:right;padding:8px 12px;color:#888;border-bottom:2px solid #f0f0f0;">最新損益</th>
+  </tr>`;
+
+  const rows = symbols.map(sym => {
+    const s = stocks[sym];
+    const byDate = Object.fromEntries(s.data.map(d => [d.date, d.profit]));
+    const latest = s.data[s.data.length - 1]?.profit ?? 0;
+    const cls = latest >= 0 ? 'color:#ef4444' : 'color:#22c55e';
+    const cells = allDates.map(d => {
+      const v = byDate[d];
+      if (v == null) return `<td style="text-align:right;padding:8px 12px;border-bottom:1px solid #f5f5f5;color:#ccc;">—</td>`;
+      const c = v >= 0 ? 'color:#ef4444' : 'color:#22c55e';
+      return `<td style="text-align:right;padding:8px 12px;border-bottom:1px solid #f5f5f5;${c};white-space:nowrap;">${v >= 0 ? '+' : ''}${v.toLocaleString('zh-TW')}</td>`;
+    }).join('');
+    return `<tr style="cursor:pointer;" onclick="selectStock('${sym}', null)">
+      <td style="padding:8px 12px;border-bottom:1px solid #f5f5f5;white-space:nowrap;">
+        <div style="font-weight:600;">${s.name}</div>
+        <div style="font-size:0.72rem;color:#aaa;">${sym}</div>
+      </td>
+      ${cells}
+      <td style="text-align:right;padding:8px 12px;border-bottom:1px solid #f5f5f5;font-weight:700;${cls};white-space:nowrap;">${latest >= 0 ? '+' : ''}${latest.toLocaleString('zh-TW')}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('stockTbody').innerHTML = rows;
+}
+
+async function takeSnapshot() {
+  const btn = document.getElementById('snapBtn');
+  btn.disabled = true;
+  btn.textContent = '快照中...';
+  try {
+    const res = await fetch('api/history/snapshot', { method: 'POST', headers: {'Content-Type': 'application/json'} });
+    const d = await res.json();
+    if (d.ok) {
+      btn.textContent = '✅ 完成';
+      loadData(_currentDays, null);
+    } else {
+      btn.textContent = '❌ ' + (d.error || '失敗');
+    }
+  } catch {
+    btn.textContent = '❌ 失敗';
+  }
+  setTimeout(() => { btn.disabled = false; btn.textContent = '立即快照'; }, 5000);
+}
+
+loadData(30, null);
+window.addEventListener('resize', () => chart.resize());
+</script>
+</body>
+</html>

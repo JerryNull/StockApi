@@ -46,6 +46,14 @@
 <header>
   <h1>📊 產業 Dashboard</h1>
   <span class="badge" id="lastUpdate">載入中...</span>
+  <div style="margin-left:auto;display:flex;gap:8px;">
+    <a href="." style="display:inline-flex;align-items:center;gap:6px;padding:6px 14px;
+       background:rgba(255,255,255,0.1);color:#ccc;border-radius:8px;text-decoration:none;
+       font-size:0.82rem;font-weight:600;">← 股價查詢</a>
+    <a href="inventory" style="display:inline-flex;align-items:center;gap:6px;padding:6px 14px;
+       background:rgba(255,255,255,0.1);color:#ccc;border-radius:8px;text-decoration:none;
+       font-size:0.82rem;font-weight:600;">📦 庫存</a>
+  </div>
 </header>
 
 <div class="grid">
@@ -108,7 +116,7 @@ async function loadSectors() {
   }
   try {
     const days = getSelectedDays();
-    const res = await fetch(`/api/sector/summaries?days=${days}`);
+    const res = await fetch(`api/sector/summaries?days=${days}`);
     if (!res.ok) throw new Error(await res.text());
     const payload = await res.json();
     sectorsData = Array.isArray(payload) ? payload : (payload.data || []);
@@ -198,7 +206,7 @@ async function loadTreemap(industryCode) {
   }
   try {
     const days = getSelectedDays();
-    const res = await fetch(`/api/sector/stocks/${industryCode}?days=${days}`);
+    const res = await fetch(`api/sector/stocks/${industryCode}?days=${days}`);
     if (!res.ok) throw new Error(await res.text());
     const payload = await res.json();
     const stocks = Array.isArray(payload) ? payload : (payload.data || []);

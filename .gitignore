@@ -1,0 +1,26 @@
+# 個人資產資料（不推上 GitHub）
+data/
+
+# 設定檔（含 API 金鑰、憑證）
+*.ini
+*.p12
+*.P12
+*.pem
+
+# 自選股與到價通知（個人資料）
+watchlist.production.txt
+price_alerts.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Log
+*.log

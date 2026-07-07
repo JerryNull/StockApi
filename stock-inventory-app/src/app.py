@@ -1,11 +1,14 @@
 import os
 import json
+import time
 import threading
 import urllib.request
 from configparser import ConfigParser
+from datetime import datetime
 from flask import Flask, render_template, jsonify, request
 from services.account_client import AccountClient
 from services.sector_service import SectorService
+from services.snapshot_service import init_db, save_snapshot, get_history, get_stock_history
 from esun_marketdata import EsunMarketdata
 from esun_trade.sdk import SDK as EsunTradeSDK
 
@@ -21,6 +24,38 @@ rest_stock = marketdata_sdk.rest_client.stock
 
 trade_sdk = EsunTradeSDK(config)
 trade_sdk.login()
+
+_sdk_lock = threading.Lock()
+
+def _relogin():
+    """重新登入兩個 SDK，thread-safe"""
+    global marketdata_sdk, rest_stock, trade_sdk
+    with _sdk_lock:
+        try:
+            marketdata_sdk = EsunMarketdata(config)
+            marketdata_sdk.login()
+            rest_stock = marketdata_sdk.rest_client.stock
+            trade_sdk = EsunTradeSDK(config)
+            trade_sdk.login()
+            print(f"[{datetime.now()}] SDK 重新登入成功")
+        except Exception as e:
+            print(f"[{datetime.now()}] SDK 重新登入失敗: {e}")
+
+def safe_quote(symbol):
+    """取報價，若 session 失效自動重登一次"""
+    global rest_stock
+    try:
+        q = rest_stock.intraday.quote(symbol=symbol)
+        # 若關鍵欄位全空視為 session 失效
+        if q.get('lastPrice') is None and q.get('closePrice') is None and q.get('name') == symbol:
+            raise ValueError("session_expired")
+        return q
+    except Exception as e:
+        if 'session_expired' in str(e) or '401' in str(e) or 'Unauthorized' in str(e):
+            print(f"[{datetime.now()}] 偵測到 session 失效，重新登入...")
+            _relogin()
+            return rest_stock.intraday.quote(symbol=symbol)
+        raise
 
 # ── 自選股 & 到價通知 ────────────────────────────────────────────
 WATCHLIST_FILE = os.path.join(base_dir, '..', '..', 'watchlist.production.txt')
@@ -80,7 +115,7 @@ def price_monitor():
                 if a.get('triggered'):
                     continue
                 try:
-                    q = rest_stock.intraday.quote(symbol=sym)
+                    q = safe_quote(sym)
                     price = q.get('lastPrice') or q.get('closePrice')
                     if price is None:
                         continue
@@ -103,6 +138,29 @@ def price_monitor():
 
 threading.Thread(target=price_monitor, daemon=True).start()
 
+# ── 每日快照排程 ─────────────────────────────────────────────────
+init_db()
+
+def _daily_snapshot_loop():
+    """每天收盤後 14:35 存一次快照"""
+    import time as _time
+    while True:
+        now = datetime.now()
+        # 計算距離今天 14:35 的秒數
+        target = now.replace(hour=14, minute=35, second=0, microsecond=0)
+        if now >= target:
+            target = target.replace(day=target.day + 1)
+        wait_sec = (target - now).total_seconds()
+        _time.sleep(wait_sec)
+        try:
+            inv = account_client._inventory_cache or account_client.get_inventory_details()
+            save_snapshot(inv)
+            print(f"[{datetime.now()}] 每日快照已儲存，持股數：{len(inv) if inv else 0}")
+        except Exception as e:
+            print(f"[{datetime.now()}] 快照失敗: {e}")
+
+threading.Thread(target=_daily_snapshot_loop, daemon=True).start()
+
 # ── Flask 應用 ──────────────────────────────────────────────────
 app = Flask(__name__)
 account_client = AccountClient(trade_sdk)
@@ -122,9 +180,12 @@ def index():
         err = str(e)
         if 'AGR0003' in err or 'Rate Limit' in err:
             return render_template('inventory_view.html', inventory=None,
-                                   error='API 頻率限制，請稍後再試（每分鐘限制一次）')
-        return render_template('inventory_view.html', inventory=None, error=err)
-    return render_template('inventory_view.html', inventory=inventory_details, error=None)
+                                   error='API 頻率限制，請稍後再試（每分鐘限制一次）',
+                                   last_updated=None)
+        return render_template('inventory_view.html', inventory=None, error=err, last_updated=None)
+    ts = account_client.get_last_updated()
+    last_updated = datetime.fromtimestamp(ts).strftime('%H:%M:%S') if ts else None
+    return render_template('inventory_view.html', inventory=inventory_details, error=None, last_updated=last_updated)
 
 
 @app.route('/api/prices')
@@ -133,7 +194,7 @@ def api_prices():
     result  = []
     for sym in symbols:
         try:
-            q = rest_stock.intraday.quote(symbol=sym)
+            q = safe_quote(sym)
             with alert_lock:
                 alert = price_alerts.get(sym)
             result.append({
@@ -185,6 +246,34 @@ def api_alert_delete(symbol):
         price_alerts.pop(symbol, None)
     save_alerts(price_alerts)
     return jsonify({'ok': True})
+
+
+@app.route('/history')
+def history_page():
+    return render_template('history.html')
+
+@app.route('/api/history')
+def api_history():
+    days = request.args.get('days', default=90, type=int)
+    return jsonify(get_history(days))
+
+@app.route('/api/history/stocks')
+def api_history_stocks():
+    days = request.args.get('days', default=90, type=int)
+    return jsonify(get_stock_history(days))
+
+@app.route('/api/history/snapshot', methods=['POST'])
+def api_snapshot_now():
+    """手動觸發一次快照（只用快取，不額外呼叫 API）"""
+    with account_client._lock:
+        inv = account_client._inventory_cache
+    if not inv:
+        return jsonify({'error': '庫存快取尚未建立，請稍後再試（約 90 秒後自動更新）'}), 503
+    try:
+        save_snapshot(inv)
+        return jsonify({'ok': True, 'holdings': len(inv)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/sector')

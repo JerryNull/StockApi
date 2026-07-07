@@ -1,7 +1,8 @@
 import time
 import threading
 
-CACHE_TTL = 120  # 快取 120 秒
+CACHE_TTL      = 120   # 快取 120 秒
+AUTO_REFRESH   = 90    # 背景自動刷新間隔（秒），略短於 TTL
 
 class AccountClient:
     def __init__(self, trade_sdk):
@@ -9,13 +10,25 @@ class AccountClient:
         self._inventory_cache = None
         self._inventory_ts    = 0
         self._lock            = threading.Lock()
+        # 啟動定時自動刷新執行緒
+        threading.Thread(target=self._auto_refresh_loop, daemon=True).start()
+
+    def _auto_refresh_loop(self):
+        """每 AUTO_REFRESH 秒主動更新一次庫存快取"""
+        while True:
+            time.sleep(AUTO_REFRESH)
+            self._refresh_cache()
+
+    def get_last_updated(self):
+        with self._lock:
+            return self._inventory_ts if self._inventory_ts else None
 
     def get_inventory_details(self):
         with self._lock:
             age   = time.time() - self._inventory_ts
             cache = self._inventory_cache
 
-        # 有快取就直接回傳，背景更新
+        # 有快取就直接回傳，若快取過期則背景更新
         if cache is not None:
             if age >= CACHE_TTL:
                 threading.Thread(target=self._refresh_cache, daemon=True).start()
